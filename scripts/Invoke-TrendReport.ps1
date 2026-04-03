@@ -226,16 +226,16 @@ function Get-RedditItems {
     )
 
     $headers = @{
-        "User-Agent" = "TrendScraperBot/1.0 by hammaker.dan@gmail.com"
         "Accept" = "application/json"
     }
+    $userAgent = "TrendScraperBot/1.0 (+https://github.com/danhammaker/social-trend-reporter)"
 
     $items = New-Object System.Collections.Generic.List[object]
 
     foreach ($source in $Sources) {
         $uri = "https://api.reddit.com/r/$($source.subreddit)/top?t=day&limit=$($source.limit)&raw_json=1"
         try {
-            $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
+            $response = Invoke-RestMethod -Uri $uri -Headers $headers -UserAgent $userAgent -Method Get -TimeoutSec 30
         }
         catch {
             Write-Warning "Reddit fetch failed for r/$($source.subreddit): $($_.Exception.Message)"

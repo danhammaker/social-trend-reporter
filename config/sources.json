@@ -1,0 +1,50 @@
+{
+  "reddit": [
+    {
+      "name": "memes",
+      "subreddit": "memes",
+      "limit": 35
+    },
+    {
+      "name": "dankmemes",
+      "subreddit": "dankmemes",
+      "limit": 35
+    },
+    {
+      "name": "OutOfTheLoop",
+      "subreddit": "OutOfTheLoop",
+      "limit": 25
+    },
+    {
+      "name": "TikTokCringe",
+      "subreddit": "TikTokCringe",
+      "limit": 30
+    },
+    {
+      "name": "youtubehaiku",
+      "subreddit": "youtubehaiku",
+      "limit": 25
+    }
+  ],
+  "youtube": [],
+  "x": {
+    "enabled": true,
+    "bearerTokenPath": "..\\secrets\\x-bearer-token.txt",
+    "woeid": 23424977,
+    "maxTrends": 5,
+    "postsPerTrend": 5,
+    "querySuffix": "lang:en -is:retweet"
+  },
+  "tiktok": {
+    "enabled": true,
+    "maxVideos": 8,
+    "seedUrls": [
+      "https://www.tiktok.com/"
+    ]
+  },
+  "output": {
+    "directory": "..\\reports",
+    "topTopics": 5,
+    "examplesPerTopic": 3
+  }
+}

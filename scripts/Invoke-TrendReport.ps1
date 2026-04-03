@@ -463,7 +463,7 @@ function Get-TikTokVideoLinksFromHtml {
         [string]$Html
     )
 
-    $matches = [regex]::Matches($Html, "https://www\.tiktok\.com/@[^\"'\s<>]+/video/\d+")
+    $matches = [regex]::Matches($Html, 'https://www\.tiktok\.com/@[^"''\s<>]+/video/\d+')
     $links = New-Object System.Collections.Generic.HashSet[string]
     foreach ($match in $matches) {
         $links.Add($match.Value) | Out-Null
@@ -779,7 +779,7 @@ function New-HtmlReport {
             Group-Object Platform |
             Sort-Object Count -Descending |
             ForEach-Object {
-                "<div style=\"padding:12px 14px; background:#eff6ff; border-radius:12px; font:600 14px/1.4 Segoe UI, Arial, sans-serif;\">$($_.Name): $($_.Count)</div>"
+                "<div style=""padding:12px 14px; background:#eff6ff; border-radius:12px; font:600 14px/1.4 Segoe UI, Arial, sans-serif;"">$($_.Name): $($_.Count)</div>"
             }
     )
 
@@ -789,13 +789,13 @@ function New-HtmlReport {
         $exampleHtml = ($exampleItems | ForEach-Object {
             $link = if ($_.ExternalUrl) { $_.ExternalUrl } else { $_.Url }
             $discussion = if ($_.Url -and $_.Url -ne $link) {
-                " <a href=\"$($_.Url)\">Discussion</a>"
+                " <a href=""$($_.Url)"">Discussion</a>"
             }
             else {
                 ""
             }
 
-            "<li><a href=\"$link\">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=\"color:#666;\">($($_.Platform) via $(ConvertTo-HtmlEncoded $_.Source), score $($_.Score))</span>$discussion</li>"
+            "<li><a href=""$link"">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=""color:#666;"">($($_.Platform) via $(ConvertTo-HtmlEncoded $_.Source), score $($_.Score))</span>$discussion</li>"
         }) -join ""
 
         $topicSections.Add(@"
@@ -820,7 +820,7 @@ function New-HtmlReport {
 
     $rawItems = ($safeItems | Sort-Object PublishedAt, Score -Descending | Select-Object -First 12 | ForEach-Object {
         $link = if ($_.ExternalUrl) { $_.ExternalUrl } else { $_.Url }
-        "<li><a href=\"$link\">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=\"color:#666;\">| $($_.Platform) | $(ConvertTo-HtmlEncoded $_.Source) | $($_.PublishedAt.ToString(\"yyyy-MM-dd HH:mm\"))</span></li>"
+        "<li><a href=""$link"">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=""color:#666;"">| $($_.Platform) | $(ConvertTo-HtmlEncoded $_.Source) | $($_.PublishedAt.ToString("yyyy-MM-dd HH:mm"))</span></li>"
     }) -join ""
 
     return @"

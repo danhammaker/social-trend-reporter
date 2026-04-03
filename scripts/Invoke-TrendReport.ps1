@@ -88,11 +88,14 @@ function Get-EffectiveSetting {
     )
 
     if (-not [string]::IsNullOrWhiteSpace($ExplicitValue)) {
-        return $ExplicitValue
+        return $ExplicitValue.Trim()
     }
 
     if (-not [string]::IsNullOrWhiteSpace($EnvironmentVariableName)) {
-        return [Environment]::GetEnvironmentVariable($EnvironmentVariableName)
+        $value = [Environment]::GetEnvironmentVariable($EnvironmentVariableName)
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
     }
 
     return $null
@@ -104,20 +107,17 @@ function Get-HttpContent {
         [string]$Uri
     )
 
-    $handler = [System.Net.Http.HttpClientHandler]::new()
-    $client = [System.Net.Http.HttpClient]::new($handler)
-    $client.Timeout = [TimeSpan]::FromSeconds(30)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-    $client.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/json")
+    $headers = @{
+        "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
+        "Accept" = "text/html,application/xhtml+xml,application/json"
+    }
 
     try {
-        $response = $client.GetAsync($Uri).GetAwaiter().GetResult()
-        $response.EnsureSuccessStatusCode() | Out-Null
-        return $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $response = Invoke-WebRequest -Uri $Uri -Headers $headers -Method Get -TimeoutSec 30
+        return $response.Content
     }
-    finally {
-        $client.Dispose()
-        $handler.Dispose()
+    catch {
+        throw $_
     }
 }
 
@@ -226,13 +226,14 @@ function Get-RedditItems {
     )
 
     $headers = @{
-        "User-Agent" = "TrendScraperBot/1.0 (+https://example.local)"
+        "User-Agent" = "TrendScraperBot/1.0 by hammaker.dan@gmail.com"
+        "Accept" = "application/json"
     }
 
     $items = New-Object System.Collections.Generic.List[object]
 
     foreach ($source in $Sources) {
-        $uri = "https://www.reddit.com/r/$($source.subreddit)/top.json?t=day&limit=$($source.limit)"
+        $uri = "https://api.reddit.com/r/$($source.subreddit)/top?t=day&limit=$($source.limit)&raw_json=1"
         try {
             $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -TimeoutSec 30
         }
@@ -370,6 +371,8 @@ function Get-XItems {
         }
         $bearerToken = Get-PlainTextSecret -SecretPath $tokenPath
     }
+
+    $bearerToken = $bearerToken.Trim()
 
     $headers = @{
         Authorization = "Bearer $bearerToken"
@@ -885,6 +888,7 @@ function Get-SmtpCredential {
     $effectiveUser = Get-EffectiveSetting -ExplicitValue $UserName -EnvironmentVariableName "SMTP_USERNAME"
     $effectivePassword = Get-EffectiveSetting -ExplicitValue $PlainTextPassword -EnvironmentVariableName "SMTP_PASSWORD"
     if (-not [string]::IsNullOrWhiteSpace($effectiveUser) -and -not [string]::IsNullOrWhiteSpace($effectivePassword)) {
+        $effectivePassword = ($effectivePassword -replace "\s+", "")
         $securePassword = ConvertTo-SecureString -String $effectivePassword -AsPlainText -Force
         return [pscredential]::new($effectiveUser, $securePassword)
     }
@@ -928,7 +932,12 @@ function Send-SmtpReportEmail {
     $smtp = [System.Net.Mail.SmtpClient]::new($SmtpServer, $Port)
     $smtp.EnableSsl = $true
     $smtp.Credentials = $Credential.GetNetworkCredential()
-    $smtp.Send($message)
+    try {
+        $smtp.Send($message)
+    }
+    catch {
+        throw "SMTP authentication failed. Re-check SMTP_USERNAME/SMTP_PASSWORD in GitHub Actions secrets, and use the 16-character Gmail app password with spaces removed."
+    }
 
     $message.Dispose()
     $smtp.Dispose()

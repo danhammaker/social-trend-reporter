@@ -36,11 +36,12 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-TrendReport.ps1 `
+          .\scripts\Invoke-TrendReport.ps1 `
             -SendEmail `
             -EmailTo "hammaker.dan@gmail.com" `
             -EmailMethod Smtp `
             -SmtpUser "${env:SMTP_USERNAME}" `
+            -SmtpPassword "${env:SMTP_PASSWORD}" `
             -PassThru
 
       - name: Upload generated reports

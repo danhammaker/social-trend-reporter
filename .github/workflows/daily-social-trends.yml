@@ -1,0 +1,51 @@
+name: Daily Social Trends
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 11 * * *"
+    - cron: "10 12 * * *"
+
+jobs:
+  report:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check New York run window
+        id: gate
+        shell: pwsh
+        run: |
+          $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+          $nyNow = [System.TimeZoneInfo]::ConvertTimeFromUtc([datetime]::UtcNow, $tz)
+          "ny_now=$($nyNow.ToString('yyyy-MM-dd HH:mm:ss'))" >> $env:GITHUB_OUTPUT
+          if ($nyNow.Hour -eq 7) {
+            "should_run=true" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            "should_run=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Run daily trend report
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.should_run == 'true'
+        shell: pwsh
+        env:
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Invoke-TrendReport.ps1 `
+            -SendEmail `
+            -EmailTo "hammaker.dan@gmail.com" `
+            -EmailMethod Smtp `
+            -SmtpUser "${env:SMTP_USERNAME}" `
+            -PassThru
+
+      - name: Upload generated reports
+        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-trend-report
+          path: reports/

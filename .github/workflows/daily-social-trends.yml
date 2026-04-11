@@ -3,33 +3,26 @@ name: Daily Social Trends
 on:
   workflow_dispatch:
   schedule:
-    - cron: "10 11 * * *"
-    - cron: "10 12 * * *"
+    - cron: "7 7 * * *"
+      timezone: "America/New_York"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-social-trends
+  cancel-in-progress: false
 
 jobs:
   report:
     runs-on: windows-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Check New York run window
-        id: gate
-        shell: pwsh
-        run: |
-          $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
-          $nyNow = [System.TimeZoneInfo]::ConvertTimeFromUtc([datetime]::UtcNow, $tz)
-          "ny_now=$($nyNow.ToString('yyyy-MM-dd HH:mm:ss'))" >> $env:GITHUB_OUTPUT
-          if ($nyNow.Hour -eq 7) {
-            "should_run=true" >> $env:GITHUB_OUTPUT
-          }
-          else {
-            "should_run=false" >> $env:GITHUB_OUTPUT
-          }
-
       - name: Run daily trend report
-        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.should_run == 'true'
         shell: pwsh
         env:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
@@ -45,7 +38,7 @@ jobs:
             -PassThru
 
       - name: Upload generated reports
-        if: github.event_name == 'workflow_dispatch' || steps.gate.outputs.should_run == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: social-trend-report

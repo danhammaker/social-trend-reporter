@@ -4,10 +4,10 @@ This project builds a daily report of what was popular on social media the day b
 
 It uses public feeds that work without API keys:
 
-- Reddit `top.json` for meme, viral-video, and explainer communities
-- optional YouTube RSS feeds for channels you choose
-- optional X trend + recent-search collection with an official bearer token
-- optional TikTok public-page scraping from configured seed URLs
+- Reddit `top`, `hot`, `rising`, and `new` listings for meme, viral-video, and explainer communities
+- YouTube channel feeds, with handle-to-feed resolution when needed
+- X recent-search collection with an official bearer token and query-based topic buckets
+- TikTok public-page scraping from hashtag and account seed URLs
 
 Each run:
 
@@ -15,7 +15,8 @@ Each run:
 2. scores them,
 3. groups them into a few topic clusters,
 4. writes Markdown and HTML reports into `reports/`,
-5. can email the formatted HTML version through Outlook, Gmail SMTP, or GitHub Actions secrets.
+5. records per-source diagnostics so empty runs are easier to debug,
+6. can email the formatted HTML version through Outlook, Gmail SMTP, or GitHub Actions secrets.
 
 ## Files
 
@@ -81,16 +82,16 @@ Set these repository secrets in GitHub:
 - `SMTP_PASSWORD`: your Gmail app password
 - `X_BEARER_TOKEN`: your X bearer token, if you want X enabled
 
-The workflow is scheduled in UTC but gates itself so it only runs at 7 AM New York time across daylight saving changes. You can also trigger it manually with `Run workflow` in the GitHub Actions tab.
+The workflow is scheduled directly for `7:07 AM` in the `America/New_York` time zone, so it no longer depends on a UTC gating step. You can also trigger it manually with `Run workflow` in the GitHub Actions tab.
 
 ## Customize Sources
 
 Edit `config/sources.json` to add or remove:
 
 - Reddit subreddits
-- YouTube feeds, using either `feedUrl` or `channelId`
-- X API settings such as WOEID, trend count, and bearer token path
-- TikTok seed URLs to scrape for public video links
+- YouTube feeds, using `feedUrl`, `channelId`, `channelUrl`, or `handle`
+- X API settings such as bearer token path and `searchQueries`
+- TikTok hashtag/account seed URLs to scrape for public video links
 - output limits such as topic count and example count
 
 ## X Setup
@@ -105,14 +106,14 @@ Then set `"x": { "enabled": true }` in `config/sources.json`.
 
 ## TikTok Setup
 
-Set `"tiktok": { "enabled": true }` and add one or more public seed pages in `config/sources.json`, for example hashtag, discover, or account pages. The scraper will pull public TikTok video links from those pages and then extract metadata from the linked video pages.
+Set `"tiktok": { "enabled": true }` and add one or more public seed pages in `config/sources.json`, preferably hashtag or account pages instead of the homepage. The scraper will pull public TikTok video links from those pages and then extract metadata from the linked video pages.
 
 ## Notes
 
 - This is feed-based scraping, so it is reliable and lightweight, but it does not use private platform APIs.
-- Reddit scoring is based on post score plus comment count.
+- Reddit scoring combines post score, comment count, upvote ratio, and listing-type boosts.
 - YouTube RSS does not expose views or likes, so YouTube entries are included as concrete examples rather than hard popularity rankings.
-- X support in this project uses the official API and is the most reliable way to add X content.
-- TikTok support in this project is a best-effort public scraper. It is more fragile than the API-backed adapters and may need maintenance if TikTok changes its page structure.
+- X support in this project now uses query-based recent search instead of the more fragile trends endpoint.
+- TikTok support in this project is a best-effort public scraper. Hashtag and account seed pages work better than the homepage, but the adapter may still need maintenance if TikTok changes its page structure.
 - TikTok, Instagram, and other platforms can tighten rate limits or anti-bot protections over time.
 - GitHub Actions schedules only run from the repository's default branch.

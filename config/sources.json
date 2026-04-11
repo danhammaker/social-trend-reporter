@@ -3,43 +3,73 @@
     {
       "name": "memes",
       "subreddit": "memes",
-      "limit": 35
+      "limit": 50,
+      "listings": ["top", "hot", "rising", "new"]
     },
     {
       "name": "dankmemes",
       "subreddit": "dankmemes",
-      "limit": 35
+      "limit": 50,
+      "listings": ["top", "hot", "rising", "new"]
     },
     {
       "name": "OutOfTheLoop",
       "subreddit": "OutOfTheLoop",
-      "limit": 25
+      "limit": 40,
+      "listings": ["top", "hot", "new"]
     },
     {
       "name": "TikTokCringe",
       "subreddit": "TikTokCringe",
-      "limit": 30
+      "limit": 45,
+      "listings": ["top", "hot", "rising", "new"]
     },
     {
       "name": "youtubehaiku",
       "subreddit": "youtubehaiku",
-      "limit": 25
+      "limit": 40,
+      "listings": ["top", "hot", "new"]
     }
   ],
-  "youtube": [],
+  "youtube": [
+    {
+      "name": "Daily Dose of Internet",
+      "handle": "@DailyDoseOfInternet",
+      "weight": 18
+    },
+    {
+      "name": "FailArmy",
+      "handle": "@FailArmy",
+      "weight": 14
+    }
+  ],
   "x": {
     "enabled": true,
     "bearerTokenPath": "..\\secrets\\x-bearer-token.txt",
-    "woeid": 23424977,
-    "maxTrends": 5,
-    "postsPerTrend": 5,
-    "querySuffix": "lang:en -is:retweet"
+    "maxPerQuery": 10,
+    "maxPagesPerQuery": 2,
+    "searchQueries": [
+      {
+        "name": "Meme posts",
+        "query": "(meme OR memes OR \"reaction image\") lang:en -is:retweet -is:reply"
+      },
+      {
+        "name": "Viral videos",
+        "query": "(\"viral video\" OR \"funny video\" OR \"everyone is posting\") lang:en -is:retweet -is:reply"
+      },
+      {
+        "name": "TikTok buzz",
+        "query": "(tiktok OR fyp OR foryoupage) lang:en -is:retweet -is:reply"
+      }
+    ]
   },
   "tiktok": {
     "enabled": true,
-    "maxVideos": 8,
+    "maxVideos": 12,
     "seedUrls": [
-      "https://www.tiktok.com/"
+      "https://www.tiktok.com/tag/meme",
+      "https://www.tiktok.com/tag/viralvideo",
+      "https://www.tiktok.com/@tiktok"
     ]
   },
   "output": {

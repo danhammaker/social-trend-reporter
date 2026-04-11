@@ -23,6 +23,7 @@ $ErrorActionPreference = "Stop"
     [Net.SecurityProtocolType]::Tls12 -bor `
     [Net.SecurityProtocolType]::Tls13 -bor `
     [Net.SecurityProtocolType]::SystemDefault
+$script:CollectionNotes = New-Object System.Collections.Generic.List[object]
 
 function Get-AbsolutePath {
     param(
@@ -107,18 +108,46 @@ function Get-HttpContent {
         [string]$Uri
     )
 
-    $headers = @{
-        "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
-        "Accept" = "text/html,application/xhtml+xml,application/json"
+    $arguments = @(
+        "-sS",
+        "-L",
+        "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36",
+        "--max-time", "30",
+        $Uri
+    )
+    $content = & curl.exe @arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "curl.exe failed for $Uri with exit code $LASTEXITCODE."
     }
 
-    try {
-        $response = Invoke-WebRequest -Uri $Uri -Headers $headers -Method Get -TimeoutSec 30
-        return $response.Content
-    }
-    catch {
-        throw $_
-    }
+    return ($content | Out-String)
+}
+
+function Add-CollectionNote {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Platform,
+        [Parameter(Mandatory)]
+        [string]$Source,
+        [Parameter(Mandatory)]
+        [ValidateSet("ok","warning","error","info")]
+        [string]$Status,
+        [Parameter(Mandatory)]
+        [string]$Message,
+        [int]$ItemCount = 0
+    )
+
+    $script:CollectionNotes.Add([pscustomobject]@{
+        Platform = $Platform
+        Source = $Source
+        Status = $Status
+        Message = $Message
+        ItemCount = $ItemCount
+    }) | Out-Null
+}
+
+function Get-CollectionNotes {
+    return @($script:CollectionNotes.ToArray())
 }
 
 function Get-StopWords {
@@ -229,43 +258,147 @@ function Get-RedditItems {
         "Accept" = "application/json"
     }
     $userAgent = "TrendScraperBot/1.0 (+https://github.com/danhammaker/social-trend-reporter)"
+    $listingBoosts = @{
+        top = 24
+        hot = 16
+        rising = 18
+        new = 10
+    }
 
     $items = New-Object System.Collections.Generic.List[object]
 
     foreach ($source in $Sources) {
-        $uri = "https://api.reddit.com/r/$($source.subreddit)/top?t=day&limit=$($source.limit)&raw_json=1"
-        try {
-            $response = Invoke-RestMethod -Uri $uri -Headers $headers -UserAgent $userAgent -Method Get -TimeoutSec 30
+        $sourceName = "r/$($source.subreddit)"
+        $seenUrls = New-Object System.Collections.Generic.HashSet[string]
+        $sourceAdded = 0
+        $listings = if ($source.PSObject.Properties["listings"] -and $source.listings) {
+            @($source.listings)
         }
-        catch {
-            Write-Warning "Reddit fetch failed for r/$($source.subreddit): $($_.Exception.Message)"
-            continue
+        else {
+            @("top","hot","rising","new")
         }
 
-        foreach ($child in $response.data.children) {
-            $post = $child.data
-            $published = [DateTimeOffset]::FromUnixTimeSeconds([int64]$post.created_utc).LocalDateTime
-            if ($published -lt $Start -or $published -ge $End) {
+        foreach ($listing in $listings) {
+            $listingName = [string]$listing
+            $limit = [math]::Min(100, [math]::Max(10, [int]$source.limit))
+            $uri = switch ($listingName) {
+                "top" { "https://api.reddit.com/r/$($source.subreddit)/top?t=day&limit=$limit&raw_json=1" }
+                "hot" { "https://api.reddit.com/r/$($source.subreddit)/hot?limit=$limit&raw_json=1" }
+                "rising" { "https://api.reddit.com/r/$($source.subreddit)/rising?limit=$limit&raw_json=1" }
+                "new" { "https://api.reddit.com/r/$($source.subreddit)/new?limit=$limit&raw_json=1" }
+                default { $null }
+            }
+
+            if (-not $uri) {
+                Add-CollectionNote -Platform "Reddit" -Source $sourceName -Status "warning" -Message "Skipped unknown listing '$listingName'."
                 continue
             }
 
-            $score = 1 + [math]::Max(0, [double]$post.score) + ([math]::Max(0, [double]$post.num_comments) * 0.35)
-            $external = if ($post.PSObject.Properties["url_overridden_by_dest"] -and $post.url_overridden_by_dest) { $post.url_overridden_by_dest } else { $post.url }
-            $items.Add((New-ItemRecord `
-                -Platform "Reddit" `
-                -Source "r/$($source.subreddit)" `
-                -Title $post.title `
-                -Url ("https://www.reddit.com" + $post.permalink) `
-                -PublishedAt $published `
-                -Score $score `
-                -ExternalUrl $external `
-                -Domain $(if ($post.PSObject.Properties["domain"]) { $post.domain } else { "reddit.com" }) `
-                -Author $(if ($post.PSObject.Properties["author"]) { $post.author } else { $null }) `
-                -Summary $(if ($post.PSObject.Properties["selftext"]) { $post.selftext } else { "" })))
+            try {
+                $response = Invoke-RestMethod -Uri $uri -Headers $headers -UserAgent $userAgent -Method Get -TimeoutSec 30
+            }
+            catch {
+                $message = "Reddit fetch failed for $sourceName ($listingName): $($_.Exception.Message)"
+                Write-Warning $message
+                Add-CollectionNote -Platform "Reddit" -Source $sourceName -Status "warning" -Message "Listing '$listingName' failed: $($_.Exception.Message)"
+                continue
+            }
+
+            foreach ($child in @($response.data.children)) {
+                $post = $child.data
+                $published = [DateTimeOffset]::FromUnixTimeSeconds([int64]$post.created_utc).LocalDateTime
+                if ($published -lt $Start -or $published -ge $End) {
+                    continue
+                }
+
+                $discussionUrl = "https://www.reddit.com" + $post.permalink
+                if (-not $seenUrls.Add($discussionUrl)) {
+                    continue
+                }
+
+                $listingBoost = if ($listingBoosts.ContainsKey($listingName)) { [double]$listingBoosts[$listingName] } else { 0.0 }
+                $upvoteRatioBoost = if ($post.PSObject.Properties["upvote_ratio"] -and $post.upvote_ratio) { [double]$post.upvote_ratio * 10.0 } else { 0.0 }
+                $score = 1 +
+                    [math]::Max(0, [double]$post.score) +
+                    ([math]::Max(0, [double]$post.num_comments) * 0.45) +
+                    $listingBoost +
+                    $upvoteRatioBoost
+
+                $external = if ($post.PSObject.Properties["url_overridden_by_dest"] -and $post.url_overridden_by_dest) { $post.url_overridden_by_dest } else { $post.url }
+                $items.Add((New-ItemRecord `
+                    -Platform "Reddit" `
+                    -Source $sourceName `
+                    -Title $post.title `
+                    -Url $discussionUrl `
+                    -PublishedAt $published `
+                    -Score $score `
+                    -ExternalUrl $external `
+                    -Domain $(if ($post.PSObject.Properties["domain"]) { $post.domain } else { "reddit.com" }) `
+                    -Author $(if ($post.PSObject.Properties["author"]) { $post.author } else { $null }) `
+                    -Summary $(if ($post.PSObject.Properties["selftext"]) { $post.selftext } else { "" })))
+                $sourceAdded++
+            }
+        }
+
+        if ($sourceAdded -gt 0) {
+            Add-CollectionNote -Platform "Reddit" -Source $sourceName -Status "ok" -Message "Collected Reddit items across $($listings.Count) listing views." -ItemCount $sourceAdded
+        }
+        else {
+            Add-CollectionNote -Platform "Reddit" -Source $sourceName -Status "info" -Message "No Reddit posts fell into the requested date window."
         }
     }
 
     return $items.ToArray()
+}
+
+function Resolve-YouTubeFeedUrl {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Source
+    )
+
+    if ($Source.PSObject.Properties["feedUrl"] -and $Source.feedUrl) {
+        return [string]$Source.feedUrl
+    }
+
+    if ($Source.PSObject.Properties["channelId"] -and $Source.channelId) {
+        return "https://www.youtube.com/feeds/videos.xml?channel_id=$($Source.channelId)"
+    }
+
+    $channelUri = $null
+    if ($Source.PSObject.Properties["channelUrl"] -and $Source.channelUrl) {
+        $channelUri = [string]$Source.channelUrl
+    }
+    elseif ($Source.PSObject.Properties["handle"] -and $Source.handle) {
+        $handle = [string]$Source.handle
+        if (-not $handle.StartsWith("@")) {
+            $handle = "@$handle"
+        }
+        $channelUri = "https://www.youtube.com/$handle/videos"
+    }
+
+    if (-not $channelUri) {
+        return $null
+    }
+
+    try {
+        $html = Get-HttpContent -Uri $channelUri
+    }
+    catch {
+        Add-CollectionNote -Platform "YouTube" -Source $Source.name -Status "warning" -Message "Failed to resolve channel page: $($_.Exception.Message)"
+        return $null
+    }
+
+    $channelIdMatch = [regex]::Match($html, '"channelId":"(UC[\w-]+)"')
+    if (-not $channelIdMatch.Success) {
+        $channelIdMatch = [regex]::Match($html, '"browseId":"(UC[\w-]+)"')
+    }
+    if (-not $channelIdMatch.Success) {
+        Add-CollectionNote -Platform "YouTube" -Source $Source.name -Status "warning" -Message "Could not extract a YouTube channel ID from the configured channel page."
+        return $null
+    }
+
+    return "https://www.youtube.com/feeds/videos.xml?channel_id=$($channelIdMatch.Groups[1].Value)"
 }
 
 function Get-YouTubeItems {
@@ -281,26 +414,26 @@ function Get-YouTubeItems {
     $items = New-Object System.Collections.Generic.List[object]
 
     foreach ($source in $Sources) {
-        if ($source.feedUrl) {
-            $uri = [string]$source.feedUrl
-        }
-        elseif ($source.channelId) {
-            $uri = "https://www.youtube.com/feeds/videos.xml?channel_id=$($source.channelId)"
-        }
-        else {
-            Write-Warning "Skipping YouTube source '$($source.name)' because it has no feedUrl or channelId."
+        $uri = Resolve-YouTubeFeedUrl -Source $source
+        if (-not $uri) {
+            Write-Warning "Skipping YouTube source '$($source.name)' because it has no usable feed URL, handle, or channel ID."
             continue
         }
 
         try {
-            $response = Invoke-WebRequest -Uri $uri -Method Get -TimeoutSec 30
-            [xml]$feed = $response.Content
+            $feedContent = & curl.exe -sS -L --max-time 30 $uri
+            if ($LASTEXITCODE -ne 0) {
+                throw "curl.exe failed with exit code $LASTEXITCODE."
+            }
+            [xml]$feed = ($feedContent | Out-String)
         }
         catch {
             Write-Warning "YouTube feed failed for $($source.name): $($_.Exception.Message)"
+            Add-CollectionNote -Platform "YouTube" -Source $source.name -Status "warning" -Message "Feed request failed: $($_.Exception.Message)"
             continue
         }
 
+        $sourceAdded = 0
         $entries = @($feed.feed.entry)
         if ($entries.Count -eq 0 -and $feed.rss.channel.item) {
             $entries = @($feed.rss.channel.item)
@@ -325,8 +458,11 @@ function Get-YouTubeItems {
             }
 
             $score = 50
-            if ($source.weight) {
+            if ($source.PSObject.Properties["weight"] -and $source.weight) {
                 $score += [double]$source.weight
+            }
+            if ($entry.PSObject.Properties["group"]) {
+                $score += 4
             }
 
             $items.Add((New-ItemRecord `
@@ -340,6 +476,14 @@ function Get-YouTubeItems {
                 -Domain "youtube.com" `
                 -Author $author `
                 -Summary ""))
+            $sourceAdded++
+        }
+
+        if ($sourceAdded -gt 0) {
+            Add-CollectionNote -Platform "YouTube" -Source $source.name -Status "ok" -Message "Collected YouTube feed items." -ItemCount $sourceAdded
+        }
+        else {
+            Add-CollectionNote -Platform "YouTube" -Source $source.name -Status "info" -Message "No YouTube items matched the report date window."
         }
     }
 
@@ -379,81 +523,115 @@ function Get-XItems {
     }
 
     $items = New-Object System.Collections.Generic.List[object]
-
-    try {
-        $trendUri = "https://api.x.com/2/trends/by/woeid/$($Config.woeid)?max_trends=$($Config.maxTrends)&trend.fields=trend_name,tweet_count"
-        $trendResponse = Invoke-RestMethod -Uri $trendUri -Headers $headers -Method Get -TimeoutSec 30
-    }
-    catch {
-        Write-Warning "X trend fetch failed: $($_.Exception.Message)"
+    $queries = @($Config.searchQueries)
+    if ($queries.Count -eq 0) {
+        Add-CollectionNote -Platform "X" -Source "X" -Status "info" -Message "X is enabled but no search queries are configured."
         return @()
     }
 
-    $trends = @($trendResponse.data | Select-Object -First ([int]$Config.maxTrends))
-    foreach ($trend in $trends) {
-        $trendName = [string]$trend.trend_name
-        if ([string]::IsNullOrWhiteSpace($trendName)) {
+    $startUtc = $Start.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $endUtc = $End.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $seenIds = New-Object System.Collections.Generic.HashSet[string]
+    $defaultMaxResults = if ($Config.PSObject.Properties["maxPerQuery"]) { [int]$Config.maxPerQuery } else { 10 }
+    $defaultMaxPages = if ($Config.PSObject.Properties["maxPagesPerQuery"]) { [int]$Config.maxPagesPerQuery } else { 2 }
+
+    foreach ($queryConfig in $queries) {
+        $queryName = if ($queryConfig.PSObject.Properties["name"] -and $queryConfig.name) { [string]$queryConfig.name } else { [string]$queryConfig.query }
+        $queryText = [string]$queryConfig.query
+        if ([string]::IsNullOrWhiteSpace($queryText)) {
             continue
         }
 
-        $query = $trendName
-        if ($Config.querySuffix) {
-            $query = "$trendName $($Config.querySuffix)"
-        }
+        $maxResults = [math]::Min(100, [math]::Max(10, $(if ($queryConfig.PSObject.Properties["maxResults"] -and $queryConfig.maxResults) { [int]$queryConfig.maxResults } else { $defaultMaxResults })))
+        $maxPages = [math]::Min(5, [math]::Max(1, $(if ($queryConfig.PSObject.Properties["maxPages"] -and $queryConfig.maxPages) { [int]$queryConfig.maxPages } else { $defaultMaxPages })))
+        $queryAdded = 0
+        $nextToken = $null
 
-        $searchQuery = [uri]::EscapeDataString($query)
-        $maxResults = [math]::Min(100, [math]::Max(10, [int]$Config.postsPerTrend))
-        $searchUri = "https://api.x.com/2/tweets/search/recent?query=$searchQuery&max_results=$maxResults&tweet.fields=created_at,public_metrics,author_id,lang&expansions=author_id&user.fields=username,name"
-
-        try {
-            $searchResponse = Invoke-RestMethod -Uri $searchUri -Headers $headers -Method Get -TimeoutSec 30
-        }
-        catch {
-            Write-Warning "X search failed for trend '$trendName': $($_.Exception.Message)"
-            continue
-        }
-
-        $usersById = @{}
-        foreach ($user in @($searchResponse.includes.users)) {
-            $usersById[$user.id] = $user
-        }
-
-        foreach ($tweet in @($searchResponse.data)) {
-            $published = ([datetime]$tweet.created_at).ToLocalTime()
-            if ($published -lt $Start -or $published -ge $End) {
-                continue
+        for ($page = 0; $page -lt $maxPages; $page++) {
+            $uriBuilder = [System.Text.StringBuilder]::new("https://api.x.com/2/tweets/search/recent?")
+            [void]$uriBuilder.Append("query=$([uri]::EscapeDataString($queryText))")
+            [void]$uriBuilder.Append("&max_results=$maxResults")
+            [void]$uriBuilder.Append("&start_time=$([uri]::EscapeDataString($startUtc))")
+            [void]$uriBuilder.Append("&end_time=$([uri]::EscapeDataString($endUtc))")
+            [void]$uriBuilder.Append("&tweet.fields=created_at,public_metrics,author_id,lang")
+            [void]$uriBuilder.Append("&expansions=author_id")
+            [void]$uriBuilder.Append("&user.fields=username,name")
+            [void]$uriBuilder.Append("&sort_order=relevancy")
+            if ($nextToken) {
+                [void]$uriBuilder.Append("&next_token=$([uri]::EscapeDataString($nextToken))")
             }
 
-            $metrics = $tweet.public_metrics
-            $score = 1 +
-                ([double]$metrics.like_count) +
-                ([double]$metrics.retweet_count * 2.0) +
-                ([double]$metrics.reply_count * 1.5) +
-                ([double]$metrics.quote_count * 2.0)
-
-            $author = $null
-            if ($usersById.ContainsKey($tweet.author_id)) {
-                $author = "@$($usersById[$tweet.author_id].username)"
+            try {
+                $searchResponse = Invoke-RestMethod -Uri $uriBuilder.ToString() -Headers $headers -Method Get -TimeoutSec 30
+            }
+            catch {
+                Write-Warning "X search failed for '$queryName': $($_.Exception.Message)"
+                Add-CollectionNote -Platform "X" -Source $queryName -Status "warning" -Message "Search failed: $($_.Exception.Message)"
+                break
             }
 
-            $tweetUrl = if ($author) {
-                "https://x.com/$($author.TrimStart('@'))/status/$($tweet.id)"
-            }
-            else {
-                "https://x.com/i/web/status/$($tweet.id)"
+            $usersById = @{}
+            foreach ($user in @($searchResponse.includes.users)) {
+                $usersById[$user.id] = $user
             }
 
-            $items.Add((New-ItemRecord `
-                -Platform "X" `
-                -Source "Trend: $trendName" `
-                -Title (($tweet.text -replace '\s+', ' ').Trim()) `
-                -Url $tweetUrl `
-                -PublishedAt $published `
-                -Score $score `
-                -ExternalUrl $tweetUrl `
-                -Domain "x.com" `
-                -Author $author `
-                -Summary "Trend topic: $trendName"))
+            foreach ($tweet in @($searchResponse.data)) {
+                if (-not $seenIds.Add([string]$tweet.id)) {
+                    continue
+                }
+
+                $published = ([datetime]$tweet.created_at).ToLocalTime()
+                if ($published -lt $Start -or $published -ge $End) {
+                    continue
+                }
+
+                $metrics = $tweet.public_metrics
+                $score = 1 +
+                    ([double]$metrics.like_count) +
+                    ([double]$metrics.retweet_count * 2.0) +
+                    ([double]$metrics.reply_count * 1.5) +
+                    ([double]$metrics.quote_count * 2.0)
+
+                $author = $null
+                if ($usersById.ContainsKey($tweet.author_id)) {
+                    $author = "@$($usersById[$tweet.author_id].username)"
+                }
+
+                $tweetUrl = if ($author) {
+                    "https://x.com/$($author.TrimStart('@'))/status/$($tweet.id)"
+                }
+                else {
+                    "https://x.com/i/web/status/$($tweet.id)"
+                }
+
+                $items.Add((New-ItemRecord `
+                    -Platform "X" `
+                    -Source $queryName `
+                    -Title (($tweet.text -replace '\s+', ' ').Trim()) `
+                    -Url $tweetUrl `
+                    -PublishedAt $published `
+                    -Score $score `
+                    -ExternalUrl $tweetUrl `
+                    -Domain "x.com" `
+                    -Author $author `
+                    -Summary "Search query: $queryName"))
+                $queryAdded++
+            }
+
+            $nextToken = $null
+            if ($searchResponse.meta -and $searchResponse.meta.next_token) {
+                $nextToken = [string]$searchResponse.meta.next_token
+            }
+            if (-not $nextToken) {
+                break
+            }
+        }
+
+        if ($queryAdded -gt 0) {
+            Add-CollectionNote -Platform "X" -Source $queryName -Status "ok" -Message "Collected X posts from recent search." -ItemCount $queryAdded
+        }
+        elseif (-not @($script:CollectionNotes | Where-Object { $_.Platform -eq "X" -and $_.Source -eq $queryName -and $_.Status -eq "warning" }).Count) {
+            Add-CollectionNote -Platform "X" -Source $queryName -Status "info" -Message "No X posts matched the report date window."
         }
     }
 
@@ -466,10 +644,18 @@ function Get-TikTokVideoLinksFromHtml {
         [string]$Html
     )
 
-    $matches = [regex]::Matches($Html, 'https://www\.tiktok\.com/@[^"''\s<>]+/video/\d+')
     $links = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($match in $matches) {
+
+    foreach ($match in [regex]::Matches($Html, 'https://www\.tiktok\.com/@[^"''\s<>]+/video/\d+')) {
         $links.Add($match.Value) | Out-Null
+    }
+
+    foreach ($match in [regex]::Matches($Html, '/@[^"''\s<>]+/video/\d+')) {
+        $links.Add("https://www.tiktok.com$($match.Value)") | Out-Null
+    }
+
+    foreach ($match in [regex]::Matches($Html, '"uniqueId":"([^"\\]+)".{0,400}?"id":"(\d{8,})"', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        $links.Add("https://www.tiktok.com/@$($match.Groups[1].Value)/video/$($match.Groups[2].Value)") | Out-Null
     }
 
     return @($links)
@@ -547,10 +733,17 @@ function Get-TikTokItems {
         }
         catch {
             Write-Warning "TikTok seed fetch failed for $seedUrl : $($_.Exception.Message)"
+            Add-CollectionNote -Platform "TikTok" -Source $seedUrl -Status "warning" -Message "Seed page fetch failed: $($_.Exception.Message)"
             continue
         }
 
-        foreach ($link in (Get-TikTokVideoLinksFromHtml -Html $seedContent)) {
+        $seedLinks = @(Get-TikTokVideoLinksFromHtml -Html $seedContent)
+        if ($seedLinks.Count -eq 0) {
+            Add-CollectionNote -Platform "TikTok" -Source $seedUrl -Status "info" -Message "Seed page returned no extractable TikTok video links."
+            continue
+        }
+
+        foreach ($link in $seedLinks) {
             if ($allVideoLinks.Count -ge [int]$Config.maxVideos) {
                 break
             }
@@ -560,6 +753,7 @@ function Get-TikTokItems {
         }
     }
 
+    $added = 0
     foreach ($videoUrl in $allVideoLinks) {
         $metadata = Get-TikTokVideoMetadata -VideoUrl $videoUrl
         if (-not $metadata) {
@@ -587,6 +781,17 @@ function Get-TikTokItems {
             -Domain "tiktok.com" `
             -Author $metadata.Author `
             -Summary $metadata.Description))
+        $added++
+    }
+
+    if ($added -gt 0) {
+        Add-CollectionNote -Platform "TikTok" -Source "Public scrape" -Status "ok" -Message "Collected TikTok items from configured seed pages." -ItemCount $added
+    }
+    elseif ($allVideoLinks.Count -eq 0) {
+        Add-CollectionNote -Platform "TikTok" -Source "Public scrape" -Status "info" -Message "No TikTok video links were discovered from the configured seed pages."
+    }
+    else {
+        Add-CollectionNote -Platform "TikTok" -Source "Public scrape" -Status "info" -Message "TikTok links were discovered, but none matched the date window or produced usable metadata."
     }
 
     return $items.ToArray()
@@ -765,6 +970,32 @@ function Get-PlatformSummaryLines {
     )
 }
 
+function Get-CollectionNoteMarkdownLine {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Note
+    )
+
+    $itemSuffix = if ($Note.ItemCount -gt 0) { " ($($Note.ItemCount) items)" } else { "" }
+    return "- [$($Note.Status.ToUpperInvariant())] $($Note.Platform) | $($Note.Source): $($Note.Message)$itemSuffix"
+}
+
+function Get-CollectionNoteHtml {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Note
+    )
+
+    $badgeColor = switch ($Note.Status) {
+        "ok" { "#166534" }
+        "warning" { "#9a3412" }
+        "error" { "#991b1b" }
+        default { "#374151" }
+    }
+    $itemSuffix = if ($Note.ItemCount -gt 0) { " ($($Note.ItemCount) items)" } else { "" }
+    return "<li><strong style=\"color:$badgeColor;\">$($Note.Status.ToUpperInvariant())</strong> $(ConvertTo-HtmlEncoded $Note.Platform) | $(ConvertTo-HtmlEncoded $Note.Source): $(ConvertTo-HtmlEncoded ($Note.Message + $itemSuffix))</li>"
+}
+
 function New-HtmlReport {
     param(
         [Parameter(Mandatory)]
@@ -772,7 +1003,9 @@ function New-HtmlReport {
         [AllowEmptyCollection()]
         [object[]]$Items,
         [AllowEmptyCollection()]
-        [object[]]$Topics
+        [object[]]$Topics,
+        [AllowEmptyCollection()]
+        [object[]]$CollectionNotes
     )
 
     $safeTopics = @($Topics)
@@ -782,7 +1015,7 @@ function New-HtmlReport {
             Group-Object Platform |
             Sort-Object Count -Descending |
             ForEach-Object {
-                "<div style=""padding:12px 14px; background:#eff6ff; border-radius:12px; font:600 14px/1.4 Segoe UI, Arial, sans-serif;"">$($_.Name): $($_.Count)</div>"
+                "<div style=\"padding:12px 14px; background:#eff6ff; border-radius:12px; font:600 14px/1.4 Segoe UI, Arial, sans-serif;\">$($_.Name): $($_.Count)</div>"
             }
     )
 
@@ -792,13 +1025,13 @@ function New-HtmlReport {
         $exampleHtml = ($exampleItems | ForEach-Object {
             $link = if ($_.ExternalUrl) { $_.ExternalUrl } else { $_.Url }
             $discussion = if ($_.Url -and $_.Url -ne $link) {
-                " <a href=""$($_.Url)"">Discussion</a>"
+                " <a href=\"$($_.Url)\">Discussion</a>"
             }
             else {
                 ""
             }
 
-            "<li><a href=""$link"">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=""color:#666;"">($($_.Platform) via $(ConvertTo-HtmlEncoded $_.Source), score $($_.Score))</span>$discussion</li>"
+            "<li><a href=\"$link\">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=\"color:#666;\">($($_.Platform) via $(ConvertTo-HtmlEncoded $_.Source), score $($_.Score))</span>$discussion</li>"
         }) -join ""
 
         $topicSections.Add(@"
@@ -821,9 +1054,10 @@ function New-HtmlReport {
 "@) | Out-Null
     }
 
+    $diagnosticItems = ($CollectionNotes | ForEach-Object { Get-CollectionNoteHtml -Note $_ }) -join ""
     $rawItems = ($safeItems | Sort-Object PublishedAt, Score -Descending | Select-Object -First 12 | ForEach-Object {
         $link = if ($_.ExternalUrl) { $_.ExternalUrl } else { $_.Url }
-        "<li><a href=""$link"">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=""color:#666;"">| $($_.Platform) | $(ConvertTo-HtmlEncoded $_.Source) | $($_.PublishedAt.ToString("yyyy-MM-dd HH:mm"))</span></li>"
+        "<li><a href=\"$link\">$(ConvertTo-HtmlEncoded $_.Title)</a> <span style=\"color:#666;\">| $($_.Platform) | $(ConvertTo-HtmlEncoded $_.Source) | $($_.PublishedAt.ToString("yyyy-MM-dd HH:mm"))</span></li>"
     }) -join ""
 
     return @"
@@ -840,6 +1074,12 @@ function New-HtmlReport {
         <div style="padding:12px 14px; background:#eff6ff; border-radius:12px; font:600 14px/1.4 Segoe UI, Arial, sans-serif;">Items collected: $($safeItems.Count)</div>
         $($platformCounts -join [Environment]::NewLine)
       </div>
+      <section style="margin:0 0 24px;">
+        <h2 style="font:600 18px/1.3 Segoe UI, Arial, sans-serif; margin:0 0 10px; color:#1f2937;">Source Diagnostics</h2>
+        <ul style="margin:0; padding-left:20px; font:14px/1.7 Segoe UI, Arial, sans-serif; color:#111827;">
+          $diagnosticItems
+        </ul>
+      </section>
       $($topicSections -join [Environment]::NewLine)
       <section style="margin-top:28px; border-top:1px solid #e5e7eb; padding-top:20px;">
         <h2 style="font:600 18px/1.3 Segoe UI, Arial, sans-serif; margin:0 0 10px; color:#1f2937;">Additional Source Links</h2>
@@ -950,7 +1190,9 @@ function New-MarkdownReport {
         [AllowEmptyCollection()]
         [object[]]$Items,
         [AllowEmptyCollection()]
-        [object[]]$Topics
+        [object[]]$Topics,
+        [AllowEmptyCollection()]
+        [object[]]$CollectionNotes
     )
 
     $topDomains = $Items |
@@ -995,6 +1237,12 @@ function New-MarkdownReport {
         }
     }
 
+    $lines.Add("## Source Diagnostics")
+    $lines.Add("")
+    foreach ($note in $CollectionNotes) {
+        $lines.Add((Get-CollectionNoteMarkdownLine -Note $note))
+    }
+    $lines.Add("")
     $lines.Add("## Raw Sources")
     $lines.Add("")
     foreach ($item in ($Items | Where-Object { $_.PSObject.Properties["Url"] -and $_.PSObject.Properties["Platform"] } | Sort-Object PublishedAt, Score -Descending)) {
@@ -1044,16 +1292,20 @@ if ($tiktokItems.Count -gt 0) {
 
 $rankedItems = @($items | Sort-Object Score -Descending)
 $topics = @(Get-Topics -Items $rankedItems -TopCount ([int]$config.output.topTopics) -ExamplesPerTopic ([int]$config.output.examplesPerTopic))
-$report = New-MarkdownReport -DateLabel $dateWindow.Label -Items $rankedItems -Topics $topics
+$collectionNotes = @(Get-CollectionNotes)
+$report = New-MarkdownReport -DateLabel $dateWindow.Label -Items $rankedItems -Topics $topics -CollectionNotes $collectionNotes
 
 $reportPath = Join-Path $resolvedOutputDir ("trend-report-{0}.md" -f $dateWindow.Label)
 $report | Set-Content -LiteralPath $reportPath -Encoding UTF8
 
-$htmlReport = New-HtmlReport -DateLabel $dateWindow.Label -Items $rankedItems -Topics $topics
+$htmlReport = New-HtmlReport -DateLabel $dateWindow.Label -Items $rankedItems -Topics $topics -CollectionNotes $collectionNotes
 $htmlPath = Join-Path $resolvedOutputDir ("trend-report-{0}.html" -f $dateWindow.Label)
 $htmlReport | Set-Content -LiteralPath $htmlPath -Encoding UTF8
 
 Write-Host "Trend report written to $reportPath"
+foreach ($note in $collectionNotes) {
+    Write-Host ("[{0}] {1} | {2}: {3}" -f $note.Status.ToUpperInvariant(), $note.Platform, $note.Source, $note.Message)
+}
 
 if ($SendEmail) {
     if (-not $EmailTo) {
@@ -1061,6 +1313,9 @@ if ($SendEmail) {
     }
 
     $subject = "{0} - {1}" -f $EmailSubject, $dateWindow.Label
+    if ($rankedItems.Count -eq 0) {
+        $subject += " (No items collected)"
+    }
     switch ($EmailMethod) {
         "Outlook" {
             Send-OutlookReportEmail -To $EmailTo -Subject $subject -HtmlBody $htmlReport
@@ -1100,5 +1355,6 @@ if ($PassThru) {
         ItemCount = $rankedItems.Count
         TopicCount = $topics.Count
         ReportDate = $dateWindow.Label
+        CollectionNotes = $collectionNotes
     }
 }
